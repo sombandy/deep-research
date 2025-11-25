@@ -6,64 +6,75 @@ investments in the past 5 years using GPT-4 and Claude Sonnet 4.5 with web searc
 """
 
 import argparse
-import json
 import os
 from datetime import datetime, timedelta
-from typing import Literal, Optional
-from dataclasses import dataclass
 
 from dotenv import load_dotenv
+from openai import OpenAI
 from pydantic import BaseModel, Field
+from rich import print_json
 
 from src.ai import ClaudeWebSearch, OpenAIWebSearch
+
 
 # Load environment variables from .env file
 load_dotenv()
 
-
-@dataclass
-class ResearchResult:
-    """Result from a single model's research."""
-    model_name: str
-    summary: str
-    supporting_links: list[str]
-    raw_response: str
-    has_qualifying_investment: bool
-
-
-class InvestmentFinding(BaseModel):
-    """Structured output for investment findings."""
+class StructuredInvestmentOutput(BaseModel):
+    """Structured output with Yes/No, summary, and credible links."""
     has_qualifying_investment: bool = Field(
-        description="Whether the firm has made a qualifying $100M+ Series B/C/D investment as lead or co-lead in the past 5 years"
+        description="Whether the VC lead or co-lead $100M+ round in the last 5 years"
     )
-    company_name: Optional[str] = Field(
-        default=None,
-        description="Name of the company that received the investment"
+    summary: str = Field(
+        description="Max 1-2 line summary of the investment, including round type, date, invested company name, any co-investor"
     )
-    round_type: Optional[Literal["Series B", "Series C", "Series D"]] = Field(
-        default=None,
-        description="Type of funding round"
+    links: list[str] = Field(
+        max_length=2,
+        description="Max 1-2 links from the most credible sources (press release, TechCrunch, Forbes or any top rated business news website)"
     )
-    amount_millions: Optional[float] = Field(
-        default=None,
-        description="Investment amount in millions of USD"
+
+
+def create_structured_output(
+    research_summary: str,
+    supporting_links: list[str]
+) -> StructuredInvestmentOutput:
+    """
+    Create structured output from research summary and links.
+
+    Args:
+        research_summary: The research summary text
+        supporting_links: List of supporting URLs
+
+    Returns:
+        StructuredInvestmentOutput with yes/no, summary, and top credible links
+    """
+    client = OpenAI()
+
+    prompt = f"""Given the following research summary and supporting links, extract and structure the information:
+
+RESEARCH SUMMARY:
+{research_summary}
+
+SUPPORTING LINKS:
+{chr(10).join(f"- {link}" for link in supporting_links)}
+
+Please extract:
+1. Whether the VC led or co-led a $100M+ round in the last 5 years (Yes/No)
+2. A concise 1-2 line summary including: round type, date, invested company name, and any co-investors
+3. The 1-2 most credible links (prioritize press releases, TechCrunch, Forbes, or other top business news sources)
+
+If the answer is NO, provide a brief explanation in the summary field and return empty links list."""
+
+    completion = client.beta.chat.completions.parse(
+        model="gpt-5-mini",
+        messages=[
+            {"role": "system", "content": "You are a financial research analyst specializing in venture capital investments."},
+            {"role": "user", "content": prompt}
+        ],
+        response_format=StructuredInvestmentOutput
     )
-    investment_date: Optional[str] = Field(
-        default=None,
-        description="Date of investment in YYYY-MM-DD format or 'YYYY-MM' if day unknown"
-    )
-    firm_role: Optional[Literal["led", "co-led"]] = Field(
-        default=None,
-        description="Whether the firm led or co-led the round"
-    )
-    summary: Optional[str] = Field(
-        default=None,
-        description="2-3 sentence summary of the qualifying investment including company, round, amount, date, and role"
-    )
-    source_urls: list[str] = Field(
-        default_factory=list,
-        description="List of credible source URLs (press releases, major business publications)"
-    )
+
+    return completion.choices[0].message.parsed
 
 
 def create_research_prompt(vc_firm_name: str) -> str:
@@ -94,8 +105,6 @@ CRITICAL RESEARCH REQUIREMENTS:
 
 
 5. OUTPUT REQUIREMENTS:
-   - DO NOT include your thinking process, search steps, or "Now I'll..." statements
-   - Start directly with your findings
    - Provide a clear 2-3 sentence summary if a qualifying investment is found
    - Include: invested company name, round type, amount, date, and whether they led or co-led
    - List only the most relevant source URLs (3-5 maximum from official sources or major publications)
@@ -113,130 +122,14 @@ Begin your research now using web search to find qualifying investments by {vc_f
     return prompt
 
 
-def research_with_model(
-    model_name: str,
-    vc_firm_name: str,
-    model_provider: str = "openai"
-) -> ResearchResult:
-    """
-    Research VC firm investments using a specific model with web search.
-
-    Args:
-        model_name: Name of the model (e.g., "gpt-4o", "claude-sonnet-4-5-20250929")
-        vc_firm_name: Name of the VC firm to research
-        model_provider: Provider name ("openai" or "anthropic")
-
-    Returns:
-        ResearchResult with findings
-    """
-    print(f"\n{'='*60}")
-    print(f"Starting research with {model_name}")
-    print(f"{'='*60}\n")
-
-    # Create the research prompt
-    prompt = create_research_prompt(vc_firm_name)
-
-    # Use different approaches based on provider
-    if model_provider == "anthropic":
-        # Use Claude helper with native web search support
-        print(f"Using Claude native web search API...")
-        claude = ClaudeWebSearch(model=model_name)
-
-        response = claude.search(prompt)
-        text_response = response.final_output
-        # Convert citations to list of URLs
-        citations = [cite.get('url', '') for cite in response.citations if cite.get('url')]
-
-    elif model_provider == "openai":
-        # Use OpenAI helper with native web search support
-        print(f"Using OpenAI native web search API...")
-        openai = OpenAIWebSearch(model=model_name)
-
-        response = openai.search(prompt)
-        text_response = response.final_output
-        # Convert citations to list of URLs
-        citations = [cite.get('url', '') for cite in response.citations if cite.get('url')]
-
-    else:
-        raise ValueError(f"Unknown model provider: {model_provider}")
-
-    # Parse the response to determine if there's a qualifying investment
-    has_qualifying = False
-    summary = text_response
-
-    # Simple heuristic: check if the response mentions specific investment details
-    if any(keyword in text_response.lower() for keyword in ["series b", "series c", "series d"]):
-        if any(keyword in text_response.lower() for keyword in ["led", "co-led", "$100m", "$100 m"]):
-            has_qualifying = True
-
-    return ResearchResult(
-        model_name=model_name,
-        summary=summary,
-        supporting_links=citations if citations else ["NA"],
-        raw_response=text_response,
-        has_qualifying_investment=has_qualifying
-    )
-
-
-def format_output(results: list[ResearchResult], vc_firm_name: str) -> str:
-    """Format the research results for display."""
-
-    output = []
-    output.append("=" * 80)
-    output.append(f"VC FIRM INVESTMENT RESEARCH REPORT")
-    output.append(f"Firm: {vc_firm_name}")
-    output.append(f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    output.append("=" * 80)
-    output.append("")
-
-    for i, result in enumerate(results, 1):
-        output.append(f"\n{'─'*80}")
-        output.append(f"RESULT #{i}: {result.model_name}")
-        output.append(f"{'─'*80}\n")
-
-        output.append("QUALIFYING INVESTMENT FOUND:")
-        output.append(f"  {result.has_qualifying_investment}")
-        output.append("")
-
-        output.append("SUMMARY:")
-        # Format summary with proper wrapping
-        summary_lines = result.summary.split('\n')
-        for line in summary_lines:
-            if line.strip():
-                output.append(f"  {line.strip()}")
-        output.append("")
-
-        output.append("SUPPORTING ARTICLE LINKS:")
-        if result.supporting_links and result.supporting_links != ["NA"]:
-            for link in result.supporting_links:
-                output.append(f"  • {link}")
-        else:
-            output.append("  • NA")
-        output.append("")
-
-    output.append("=" * 80)
-    output.append("END OF REPORT")
-    output.append("=" * 80)
-
-    return "\n".join(output)
-
-
 def main():
-    """Main execution function."""
-    parser = argparse.ArgumentParser(
-        description="Research VC firm investments using GPT-4 and Claude Sonnet 4.5 with web search"
-    )
+    parser = argparse.ArgumentParser(description="Research VC firm investments using web search")
+    parser.add_argument("vc_firm", type=str, help="Name of the VC firm to research")
     parser.add_argument(
-        "vc_firm",
+        "-m", "--model",
         type=str,
-        help="Name of the VC firm to research (e.g., 'Sequoia Capital', 'Andreessen Horowitz')"
-    )
-    parser.add_argument(
-        "-m", "--models",
-        type=str,
-        nargs="+",
-        default=["gpt-5.1", "claude-sonnet-4-5"],
-        help="Models to use for research (default: gpt-4o claude-sonnet-4-5-20250929)"
+        default="gpt-5.1",
+        help="Model to use for research (default: gpt-5.1)"
     )
     parser.add_argument(
         "-o", "--output",
@@ -246,50 +139,28 @@ def main():
 
     args = parser.parse_args()
 
-    print(f"\n🔍 Researching VC firm: {args.vc_firm}")
-    print(f"📊 Using models: {', '.join(args.models)}\n")
-
-    # Conduct research with each model
-    results = []
-
-    for model in args.models:
-        try:
-            # Determine provider
-            if "gpt" in model.lower():
-                provider = "openai"
-            elif "claude" in model.lower():
-                provider = "anthropic"
-            else:
-                print(f"⚠️  Unknown model provider for {model}, skipping...")
-                continue
-
-            result = research_with_model(model, args.vc_firm, provider)
-            results.append(result)
-
-            print(f"✅ Completed research with {model}\n")
-
-        except Exception as e:
-            import traceback
-            print(f"❌ Error with {model}: {str(e)}")
-            print(f"Full traceback:\n{traceback.format_exc()}\n")
-            continue
-
-    # Format and display results
-    if results:
-        output_text = format_output(results, args.vc_firm)
-
-        if args.output:
-            with open(args.output, 'w') as f:
-                f.write(output_text)
-            print(f"\n📄 Results saved to: {args.output}")
-        else:
-            print(output_text)
-
-        return 0
+    if "gpt" in args.model.lower():
+        researcher = OpenAIWebSearch(model=args.model)
+    elif "claude" in args.model.lower():
+        researcher = ClaudeWebSearch(model=args.model)
     else:
-        print("❌ No results obtained from any model")
+        print(f"❌ Unknown model provider for {args.model}")
         return 1
 
+
+    print(f"\n🔍 Researching VC firm: {args.vc_firm}")
+    print(f"📊 Using model: {args.model}\n")
+
+    prompt = create_research_prompt(args.vc_firm)
+    response = researcher.search(prompt)
+
+    print(f"Model summary: {response.final_output}")
+    print_json(data=response.citations)
+
+    print("Structured output:")
+    print("=" * 60)
+    structured_output = create_structured_output(response.final_output, response.citations)
+    print_json(data=structured_output.model_dump())
 
 if __name__ == "__main__":
     exit(main())
