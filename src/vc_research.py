@@ -6,13 +6,16 @@ investments in the past 5 years using GPT-4 and Claude Sonnet 4.5 with web searc
 """
 
 import argparse
+import csv
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from rich import print_json
+from tqdm import tqdm
 
 from src.ai import ClaudeWebSearch, OpenAIWebSearch
 
@@ -50,18 +53,28 @@ def create_structured_output(
     """
     client = OpenAI()
 
+    # Format links with title and URL for better selection
+    formatted_links = []
+    for link in supporting_links:
+        if isinstance(link, dict):
+            title = link.get('title', 'No title')
+            url = link.get('url', '')
+            formatted_links.append(f"- {title}\n  URL: {url}")
+        else:
+            formatted_links.append(f"- {link}")
+
     prompt = f"""Given the following research summary and supporting links, extract and structure the information:
 
 RESEARCH SUMMARY:
 {research_summary}
 
 SUPPORTING LINKS:
-{chr(10).join(f"- {link}" for link in supporting_links)}
+{chr(10).join(formatted_links)}
 
 Please extract:
 1. Whether the VC led or co-led a $100M+ round in the last 5 years (Yes/No)
 2. A concise 1-2 line summary including: round type, date, invested company name, and any co-investors
-3. The 1-2 most credible links (prioritize press releases, TechCrunch, Forbes, or other top business news sources)
+3. The 1-2 most credible links supporting (prioritize press releases, TechCrunch, Forbes, or other top business news sources)
 
 If the answer is NO, provide a brief explanation in the summary field and return empty links list."""
 
@@ -122,23 +135,90 @@ Begin your research now using web search to find qualifying investments by {vc_f
     return prompt
 
 
+def get_processed_firms(csv_path: str) -> set[str]:
+    """Get set of already processed VC firms from CSV."""
+    if not Path(csv_path).exists():
+        return set()
+
+    processed = set()
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            processed.add(row['VC Firm Name'])
+    return processed
+
+
+def append_to_csv(csv_path: str, vc_firm: str, structured_output: StructuredInvestmentOutput):
+    """Append research result to CSV file."""
+    file_exists = Path(csv_path).exists()
+
+    with open(csv_path, 'a', newline='', encoding='utf-8') as f:
+        fieldnames = ['VC Firm Name', 'Has Qualifying Investment', 'Summary', 'Supporting Links']
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+
+        if not file_exists:
+            writer.writeheader()
+
+        writer.writerow({
+            'VC Firm Name': vc_firm,
+            'Has Qualifying Investment': 'Yes' if structured_output.has_qualifying_investment else 'No',
+            'Summary': structured_output.summary,
+            'Supporting Links': ' | '.join(structured_output.links) if structured_output.links else ''
+        })
+
+
 def main():
     parser = argparse.ArgumentParser(description="Research VC firm investments using web search")
-    parser.add_argument("vc_firm", type=str, help="Name of the VC firm to research")
+
+    # Create mutually exclusive group for input
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
+        "-i", "--input-file",
+        type=str,
+        help="Path to file with VC firm names (one per line)"
+    )
+    input_group.add_argument(
+        "-n", "--name",
+        type=str,
+        help="Single VC firm name to research"
+    )
+
     parser.add_argument(
         "-m", "--model",
         type=str,
-        default="gpt-5.1",
-        help="Model to use for research (default: gpt-5.1)"
+        default="claude-sonnet-4-5",
+        help="Model to use for research (default: claude-sonnet-4-5)"
     )
-    parser.add_argument(
-        "-o", "--output",
-        type=str,
-        help="Output file path (optional, defaults to stdout)"
-    )
+    parser.add_argument("-o", "--output-csv", type=str, help="Output CSV file path")
 
     args = parser.parse_args()
 
+    # Get list of VC firms from either file or single name
+    if args.input_file:
+        with open(args.input_file, 'r', encoding='utf-8') as f:
+            vc_firms = [line.strip() for line in f if line.strip()]
+    else:
+        vc_firms = [args.name]
+
+    # Get already processed firms only if output CSV is provided
+    if args.output_csv:
+        processed_firms = get_processed_firms(args.output_csv)
+        remaining_firms = [firm for firm in vc_firms if firm not in processed_firms]
+
+        if not remaining_firms:
+            print("✅ All firms already processed!")
+            return 0
+
+        print(f"\n📋 Total firms: {len(vc_firms)}")
+        print(f"✅ Already processed: {len(processed_firms)}")
+        print(f"🔄 Remaining: {len(remaining_firms)}")
+    else:
+        remaining_firms = vc_firms
+        print(f"\n📋 Total firms: {len(vc_firms)}")
+
+    print(f"📊 Using model: {args.model}\n")
+
+    # Initialize researcher
     if "gpt" in args.model.lower():
         researcher = OpenAIWebSearch(model=args.model)
     elif "claude" in args.model.lower():
@@ -147,20 +227,27 @@ def main():
         print(f"❌ Unknown model provider for {args.model}")
         return 1
 
+    # Process each VC firm with progress bar
+    for vc_firm in tqdm(remaining_firms, desc="Researching VC firms"):
+        try:
+            print(f"Researching {vc_firm}")
+            prompt = create_research_prompt(vc_firm)
+            response = researcher.search(prompt)
 
-    print(f"\n🔍 Researching VC firm: {args.vc_firm}")
-    print(f"📊 Using model: {args.model}\n")
+            structured_output = create_structured_output(response.final_output, response.citations)
+            print_json(data=structured_output.model_dump())
+            
+            if args.output_csv:
+                append_to_csv(args.output_csv, vc_firm, structured_output)
+            
+            tqdm.write(f"✅ {vc_firm}: {'Yes' if structured_output.has_qualifying_investment else 'No'}")
 
-    prompt = create_research_prompt(args.vc_firm)
-    response = researcher.search(prompt)
+        except Exception as e:
+            tqdm.write(f"❌ Error processing {vc_firm}: {str(e)}")
+            continue
 
-    print(f"Model summary: {response.final_output}")
-    print_json(data=response.citations)
-
-    print("Structured output:")
-    print("=" * 60)
-    structured_output = create_structured_output(response.final_output, response.citations)
-    print_json(data=structured_output.model_dump())
+    print(f"\n✅ Research complete! Results saved to: {args.output_csv}")
+    return 0
 
 if __name__ == "__main__":
     exit(main())
