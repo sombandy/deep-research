@@ -190,6 +190,12 @@ def main():
         help="Model to use for research (default: claude-sonnet-4-5)"
     )
     parser.add_argument("-o", "--output-csv", type=str, help="Output CSV file path")
+    parser.add_argument(
+        "--max-searches",
+        type=int,
+        default=3,
+        help="Maximum number of web searches per query (default: 2)"
+    )
 
     args = parser.parse_args()
 
@@ -222,7 +228,7 @@ def main():
     if "gpt" in args.model.lower():
         researcher = OpenAIWebSearch(model=args.model)
     elif "claude" in args.model.lower():
-        researcher = ClaudeWebSearch(model=args.model)
+        researcher = ClaudeWebSearch(model=args.model, max_uses=args.max_searches)
     else:
         print(f"❌ Unknown model provider for {args.model}")
         return 1

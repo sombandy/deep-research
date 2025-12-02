@@ -5,7 +5,7 @@ This module provides a helper class to interact with Claude using Anthropic's SD
 with built-in web search capabilities and citation extraction.
 """
 
-import sys
+import json
 from typing import Optional
 
 from anthropic import Anthropic
@@ -19,7 +19,7 @@ class ClaudeWebSearch:
     def __init__(
         self,
         model: str = "claude-sonnet-4-5",
-        temperature: float = 0.1,
+        max_uses: int = 3,
         max_tokens: int = 4096
     ):
         """
@@ -31,7 +31,7 @@ class ClaudeWebSearch:
             max_tokens: Maximum tokens in response
         """
         self.model = model
-        self.temperature = temperature
+        self.max_uses = max_uses
         self.max_tokens = max_tokens
 
         self.client = Anthropic()
@@ -61,7 +61,8 @@ class ClaudeWebSearch:
         tools = [
             {
                 "type": "web_search_20250305",
-                "name": "web_search"
+                "name": "web_search",
+                "max_uses": self.max_uses
             }
         ]
 
@@ -69,7 +70,6 @@ class ClaudeWebSearch:
         kwargs = {
             "model": self.model,
             "max_tokens": self.max_tokens,
-            "temperature": self.temperature,
             "messages": messages,
             "tools": tools,
         }
@@ -126,6 +126,15 @@ class ClaudeWebSearch:
                             citations_seen.add(url)
 
         final_output = "\n".join(final_text_parts)
+        
+        # Print number of web searches performed
+        web_search_requests = 0
+        if hasattr(response, 'usage') and response.usage:
+            server_tool_use = getattr(response.usage, 'server_tool_use', None)
+            if server_tool_use:
+                web_search_requests = getattr(server_tool_use, 'web_search_requests', 0)
+        
+        print(f"🔍 Web searches performed: {web_search_requests}")
 
         return WebSearchResponse(
             final_output=final_output,
@@ -135,32 +144,43 @@ class ClaudeWebSearch:
 
 
 def main():
+    import argparse
     from dotenv import load_dotenv
     load_dotenv()
     
-    if len(sys.argv) == 2:
-        prompt = sys.argv[1]
-    else:
-        prompt = "What is Nvidia stock price today? Also, what is the top news on Nvidia?"
+    parser = argparse.ArgumentParser(description="Claude web search with configurable max uses")
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        default="What is Nvidia stock price today? Also, what is the top news on Nvidia?",
+        help="Search prompt/question"
+    )
+    parser.add_argument(
+        "--max-uses",
+        type=int,
+        default=2,
+        help="Maximum number of web searches (default: 2)"
+    )
+    
+    args = parser.parse_args()
 
     claude = ClaudeWebSearch(
-        model="claude-sonnet-4-5-20250929",
-        temperature=0.1,
+        max_uses=args.max_uses,
     )
 
-    print(f"\nPrompt: {prompt}\n")
+    print(f"\nPrompt: {args.prompt}\n")
     print("Executing search...\n")
     
-    response = claude.search(prompt)
+    response = claude.search(args.prompt)
 
-    print("=" * 80)
-    print("RESPONSE:")
-    print("=" * 80)
-    print(response.text)
-    print("\n" + "=" * 80)
-    print("CITATIONS:")
-    print("=" * 80)
+    print("Raw response saved to tmp/claude_raw.json")
+    with open("tmp/claude_raw.json", "w", encoding="utf-8") as f:
+        json.dump(response.raw_response, f, indent=2)
 
+    print("Final output:")
+    print(response.final_output)
+
+    print("Citations:")
     if response.citations:
         for i, citation in enumerate(response.citations, 1):
             print(f"{i}. {citation}")

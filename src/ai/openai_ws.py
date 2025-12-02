@@ -5,12 +5,16 @@ This module provides a helper class to interact with OpenAI using the OpenAI SDK
 with built-in web search capabilities and citation extraction using the Responses API.
 """
 
+import json
 import sys
+from pathlib import Path
 import warnings
 from typing import Optional
 
 from openai import OpenAI
+
 from src.ai.response import WebSearchResponse
+
 
 
 class OpenAIWebSearch:
@@ -45,16 +49,11 @@ class OpenAIWebSearch:
         if system_prompt:
             full_input = f"{system_prompt}\n\n{prompt}"
 
-        # Define web search tool for Responses API
-        tools = [{"type": "web_search"}]
-
         # Make API call with web search enabled using Responses API
         response = self.client.responses.create(
             model=self.model,
             input=full_input,
-            tools=tools,
-            tool_choice="auto",
-            include=["web_search_call.action.sources"]
+            tools=[{"type": "web_search"}],
         )
 
         # Extract text and citations from response
@@ -112,21 +111,21 @@ def main():
     else:
         prompt = "What is Nvidia stock price today? Also, what is the top news on Nvidia?"
 
-    openai_search = OpenAIWebSearch(model="gpt-4o")
+    openai_search = OpenAIWebSearch()
 
     print(f"\nPrompt: {prompt}\n")
     print("Executing search...\n")
 
     response = openai_search.search(prompt)
 
-    print("=" * 80)
-    print("RESPONSE:")
-    print("=" * 80)
-    print(response.final_output)
-    print("\n" + "=" * 80)
-    print("CITATIONS:")
-    print("=" * 80)
+    print("Raw response saved to tmp/openai_raw.json")
+    with open("tmp/openai_raw.json", "w", encoding="utf-8") as f:
+        json.dump(response.raw_response, f, indent=2)
 
+    print("Final output:")
+    print(response.final_output)
+
+    print("Citations:")
     if response.citations:
         for i, citation in enumerate(response.citations, 1):
             title = citation.get('title', 'No title')
